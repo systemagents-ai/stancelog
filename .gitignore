@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# stancelog data files (never commit memories)
+*.db
+*.db-wal
+*.db-shm
+*.db.lock
+*.journal.jsonl
+*.journal.jsonl.bak-*
+*.corrupt-*
+.stancelog/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

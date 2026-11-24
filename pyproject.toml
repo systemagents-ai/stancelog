@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stancelog"
+version = "0.1.0"
+description = "Crash-proof, contradiction-aware memory for AI agents: an append-only event log of beliefs with bi-temporal history, a CLI and a zero-dependency MCP server."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Deep Mehta" }]
+keywords = ["memory", "agents", "llm", "mcp", "sqlite", "event-sourcing", "bitemporal", "claude"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+stancelog = "stancelog.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stancelog"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
