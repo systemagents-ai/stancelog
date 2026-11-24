@@ -29,6 +29,8 @@ __all__ = [
     "HeuristicExtractor",
     "LLMExtractor",
     "normalize_subject",
+    "subject_similarity",
+    "subject_tokens",
 ]
 
 
@@ -78,6 +80,78 @@ def normalize_subject(subject: str) -> str:
     s = s.strip(" .:-")
     s = _TRAILING_FILLER.sub("", s).strip(" .:-")  # fillers can stack ("A anymore please")
     return _LEADING_ARTICLE.sub("", s, count=1)  # once: "the A approach" -> "a approach"
+
+
+# --------------------------------------------------------------------------- #
+# Subject matching (used by Memory to attach paraphrases to an existing subject)
+# --------------------------------------------------------------------------- #
+
+_MATCH_TOKEN = re.compile(r"[\w#+]+(?:[.\-][\w#+]+)*", re.UNICODE)
+_MATCH_STOP = frozenset(
+    # articles, prepositions, conjunctions, pronouns, auxiliaries
+    "a an the of to in on at by for from with without into onto over under about as "
+    "and or but nor so if then than this that these those it its it's "
+    "i we you they he she me us our ours my your their his her one "
+    "is are was were be been being am do does did done doing "
+    "should would could can will shall may might must "
+    "not no never don't dont "
+    # generic action verbs that carry no topic ("use redis" == "redis")
+    "use uses used using try trying run running go going "
+    # hedges / comparatives / judgements that sometimes leak into subjects
+    "maybe perhaps probably actually really very just still also again anymore "
+    "better best good great fine ok okay bad worse worst now".split()
+)
+
+
+def _match_stem(tok: str) -> str:
+    """Very light stemmer: plural / -ing / -ed and a trailing 'e' (cache ~ caching)."""
+    for suf in ("ies", "ing", "ed", "es", "s"):
+        if tok.endswith(suf) and not tok.endswith("ss") and len(tok) - len(suf) >= 3:
+            tok = tok[: -len(suf)] + ("y" if suf == "ies" else "")
+            break
+    if len(tok) >= 5 and tok[-1] == tok[-2] and tok[-1] not in "aeiouls":
+        tok = tok[:-1]  # running -> runn -> run
+    if len(tok) > 3 and tok.endswith("e"):
+        tok = tok[:-1]
+    return tok
+
+
+def subject_tokens(subject: str) -> frozenset[str]:
+    """Content tokens of a (normalised) subject used for fuzzy matching."""
+    toks = _MATCH_TOKEN.findall(normalize_subject(subject))
+    return frozenset(_match_stem(t) for t in toks if t not in _MATCH_STOP)
+
+
+def subject_similarity(a: str | frozenset[str], b: str | frozenset[str]) -> float:
+    """Deterministic similarity in [0, 1] between two subjects; 0.0 means "never merge".
+
+    Rules (applied to :func:`subject_tokens`, i.e. after stopword removal and
+    light stemming):
+
+    * identical token sets -> 1.0
+    * no shared token, or either side empty -> 0.0
+    * the sets differ in a token containing a digit (``python 2`` vs
+      ``python 3``, ``python`` vs ``python 3``) -> 0.0
+    * one set is a subset of the other -> Jaccard, accepted if >= 0.5
+      (``redis`` ~ ``redis for the cache``; not ``redis`` ~ ``redis cluster config``)
+    * otherwise -> Jaccard, accepted only if >= 0.7
+
+    Values below the acceptance threshold are returned as 0.0.
+    """
+    ta = a if isinstance(a, frozenset) else subject_tokens(a)
+    tb = b if isinstance(b, frozenset) else subject_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    if ta == tb:
+        return 1.0
+    inter = ta & tb
+    if not inter:
+        return 0.0
+    if any(any(ch.isdigit() for ch in t) for t in ta ^ tb):
+        return 0.0
+    j = len(inter) / len(ta | tb)
+    threshold = 0.5 if (ta <= tb or tb <= ta) else 0.7
+    return j if j >= threshold else 0.0
 
 
 # --------------------------------------------------------------------------- #

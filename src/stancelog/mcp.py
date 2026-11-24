@@ -189,9 +189,10 @@ class MCPServer:
                 return {"subject": subject, "belief": _compact(b) if b else None}
             return {"beliefs": [_compact(b) for b in m.all_current(limit=int(args.get("limit") or 50))]}
         if name == "history":
-            hist = m.history(str(req("subject")))
-            return {"subject": args["subject"], "history": [_compact(b) for b in hist],
-                    "relations": m.relations(str(args["subject"]))}
+            key = m.resolve_subject(str(req("subject")))
+            hist = m.history(key)
+            return {"subject": key, "history": [_compact(b) for b in hist],
+                    "relations": m.relations(key)}
         if name == "forget":
             gone = m.forget(str(req("target")), reason=str(args.get("reason") or ""), source="mcp")
             return {"forgotten": [b.id for b in gone], "count": len(gone)}

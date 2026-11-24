@@ -10,7 +10,8 @@
 ['negative', 'positive']
 """
 
-from .extract import Claim, Extractor, HeuristicExtractor, LLMExtractor, normalize_subject
+from .extract import (Claim, Extractor, HeuristicExtractor, LLMExtractor, normalize_subject,
+                      subject_similarity, subject_tokens)
 from .store import Belief, Memory, RecoveryError, default_db_path
 
 __version__ = "0.1.0"
@@ -25,5 +26,7 @@ __all__ = [
     "RecoveryError",
     "default_db_path",
     "normalize_subject",
+    "subject_similarity",
+    "subject_tokens",
     "__version__",
 ]

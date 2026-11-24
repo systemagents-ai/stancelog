@@ -8,6 +8,7 @@ import sys
 from typing import Any, Sequence
 
 from . import __version__
+from .extract import normalize_subject
 from .store import ENV_DB, Belief, Memory, default_db_path
 
 _MARK = {1: "+", -1: "-", 0: "="}
@@ -19,10 +20,15 @@ def _fmt_belief(b: Belief, *, show_links: bool = True) -> str:
         flags.append(f"FORGOTTEN({b.forgotten_reason or ''})".replace("()", ""))
     elif b.valid_to is None:
         flags.append("CURRENT")
+    else:
+        flags.append("SUPERSEDED" + (f" by {b.superseded_by[:8]}" if b.superseded_by else ""))
     if show_links and b.contradicts:
         flags.append(f"contradicts {b.contradicts[:8]}")
-    elif show_links and b.supersedes:
+    if show_links and b.supersedes:
         flags.append(f"supersedes {b.supersedes[:8]}")
+    matched = b.metadata.get("matched_from") if isinstance(b.metadata, dict) else None
+    if matched:
+        flags.append(f"matched {matched!r} -> existing subject")
     if b.score is not None:
         flags.append(f"score={b.score:.3f}")
     until = b.valid_to or "now"
@@ -31,6 +37,22 @@ def _fmt_belief(b: Belief, *, show_links: bool = True) -> str:
         f"    id={b.id[:12]}  {b.valid_from} -> {until}  source={b.source}  conf={b.confidence:g}"
         + (f"\n    {'  '.join(flags)}" if flags else "")
     )
+
+
+def _fmt_history(asked: str, key: str, bs: list[Belief], rels: list[dict[str, str]]) -> str:
+    if not bs:
+        return f"(no history for {asked!r})"
+    head = f"history of {key!r}" + ("" if key == normalize_subject(asked) else f" (matched from {asked!r})")
+    lines = [head + f": {len(bs)} version(s), oldest first"]
+    lines += [_fmt_belief(b) for b in bs]
+    if rels:
+        by_id = {b.id: b for b in bs}
+        lines.append("relations:")
+        for r in rels:
+            src, dst = by_id.get(r["src"]), by_id.get(r["dst"])
+            desc = lambda x, i: f"{i[:8]} [{_MARK[x.polarity]}]" if x else i[:8]  # noqa: E731
+            lines.append(f"  {desc(src, r['src'])} {r['kind'].upper()} {desc(dst, r['dst'])}")
+    return "\n".join(lines)
 
 
 def _emit(args: argparse.Namespace, data: Any, human: str) -> None:
@@ -135,9 +157,11 @@ def _run(args: argparse.Namespace, mem: Memory) -> int:
         bs = mem.all_current()
         _emit(args, [b.to_dict() for b in bs], "\n".join(_fmt_belief(b, show_links=False) for b in bs) or "(empty)")
     elif cmd == "history":
-        bs = mem.history(args.subject)
-        _emit(args, {"history": [b.to_dict() for b in bs], "relations": mem.relations(args.subject)},
-              "\n".join(_fmt_belief(b) for b in bs) or f"(no history for {args.subject!r})")
+        key = mem.resolve_subject(args.subject)
+        bs = mem.history(key)
+        rels = mem.relations(key)
+        _emit(args, {"subject": key, "history": [b.to_dict() for b in bs], "relations": rels},
+              _fmt_history(args.subject, key, bs, rels))
     elif cmd == "forget":
         gone = mem.forget(args.target, reason=args.reason, source="cli")
         _emit(args, {"forgotten": [b.id for b in gone]},

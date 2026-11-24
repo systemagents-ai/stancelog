@@ -78,7 +78,8 @@ with Memory("~/.stancelog/memory.db") as m:      # or Memory() -> $STANCELOG_DB 
 ```
 
 `remember()` returns a list of `Belief`s, one per extracted claim. Explicit `subject=`,
-`polarity=` or `confidence=` arguments override what the extractor finds.
+`polarity=` or `confidence=` arguments override what the extractor finds. Each `Belief` has a
+`status`: `"current"`, `"superseded"` or `"forgotten"`.
 
 ## Quickstart: CLI
 
@@ -88,7 +89,7 @@ export STANCELOG_DB=~/.stancelog/memory.db      # or pass --db PATH (before or a
 stancelog remember "don't do A"
 stancelog remember "maybe A is better"
 stancelog current a
-stancelog history a
+stancelog history a                              # every version + SUPERSEDED/CONTRADICTS links
 stancelog recall "A" -k 5 [--all]
 stancelog forget a --reason "no longer relevant"
 stancelog current a --at 2026-01-01T00:00:00Z [--known-at ...]
@@ -174,6 +175,7 @@ from stancelog import Memory, Claim, LLMExtractor
 #   0: "editor: vim", "my editor is vim"; unmatched text becomes a neutral note
 # Hedges ("maybe", "I think", "might") lower confidence to 0.6.
 # Subjects are normalised: "A", "a" and "the A!" all map to "a".
+# Extracted subjects are then matched against existing ones (see "Subject matching").
 
 # LLM-backed: you supply the callable. stancelog never calls a network or needs an API key.
 def my_llm(prompt: str) -> str:
@@ -226,6 +228,38 @@ Same-polarity updates and neutral value changes only supersede. Relations are hi
 never change afterwards. Forgetting the newest belief by id makes the previous one current again,
 while forgetting a subject hides all of its beliefs.
 
+### Subject matching
+
+Different phrasings of the same stance often extract to slightly different subjects:
+"don't use Redis for the cache" gives `redis for the cache`, while "maybe Redis is better for the
+cache" gives `redis`. Before an extracted claim is stored, `Memory` matches it against the subjects
+that have active beliefs, and if one matches, the claim joins that subject's timeline. That makes
+the second statement supersede and contradict the first.
+
+Matching is deterministic (`stancelog.subject_similarity`). Both subjects are reduced to content
+tokens: stopwords, articles, prepositions, generic verbs such as "use" and judgement words such as
+"better" are dropped, and light stemming is applied, so "deploying on Fridays" matches "deploy on
+Fridays". Two subjects then match if:
+
+- their token sets are equal, or
+- one token set contains the other and the Jaccard overlap is at least 0.5 (`redis` matches
+  `redis for the cache`, but `redis` does not match `redis cluster config`), or
+- neither set contains the other and the Jaccard overlap is at least 0.7;
+- and in every case the sets do not differ in a token that contains a digit (`python` does not
+  match `python 3`).
+
+So `redis` and `postgres`, `tabs` and `spaces`, or `tabs for indentation` and `spaces for
+indentation` never merge. An exact live subject always wins. When several subjects match, the
+highest similarity wins, then the most recently written subject, then alphabetical order. Two
+claims from the same message are never merged into each other. When a claim is matched, the original
+extracted subject is kept in `metadata["matched_from"]`. The chosen subject is written into the
+event itself, so `rebuild()` replays it exactly.
+
+Lookups (`current`, `history`, `relations`, `events`, `forget`, and the CLI/MCP equivalents) use
+the same matching when no exact subject exists, so `current("redis")` finds `redis for the cache`.
+Passing an explicit `subject=` to `remember()` bypasses matching, and
+`Memory(..., subject_matching=False)` turns it off entirely.
+
 ### Recall ranking
 
 FTS5 (porter stemming, subject weighted 2×) is used when the SQLite build has it. Otherwise a
@@ -236,7 +270,10 @@ score = ((1 - w) * bm25 / max_bm25  +  w * 0.5 ** (age / half_life)) * (0.75 + 0
 ```
 
 The defaults are `w = 0.3` and `half_life = 30 days`, and both are configurable through `Memory(...)`.
-By default only current beliefs are returned (`include_superseded=True` returns all of them).
+By default only current beliefs are returned. With `include_superseded=True` (CLI `--all`),
+superseded and forgotten beliefs are included with their `status` set. Their score is multiplied by
+`superseded_penalty` (default 0.5) and capped just below the current belief of the same subject, so
+a subject's current belief always ranks above its own history.
 
 ### Durability guarantees and limits
 

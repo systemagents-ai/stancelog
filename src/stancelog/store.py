@@ -15,7 +15,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Iterator
 
 from . import _time
-from .extract import Claim, Extractor, HeuristicExtractor, LLMExtractor, normalize_subject
+from .extract import (Claim, Extractor, HeuristicExtractor, LLMExtractor, normalize_subject,
+                      subject_similarity, subject_tokens)
 from .hashing import GENESIS, canonical_json, event_hash
 from .journal import Journal, event_to_record
 from .search import bm25_scores, query_terms, tokenize
@@ -144,9 +145,17 @@ class Belief:
         """True if not forgotten and its valid-time interval is still open."""
         return not self.forgotten and self.valid_to is None
 
+    @property
+    def status(self) -> str:
+        """``"current"``, ``"superseded"`` (a newer belief replaced it) or ``"forgotten"``."""
+        if self.forgotten:
+            return "forgotten"
+        return "current" if self.valid_to is None else "superseded"
+
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["stance"] = self.stance
+        d["status"] = self.status
         if d["score"] is None:
             d.pop("score")
         return d
@@ -274,6 +283,12 @@ class Memory:
         busy_timeout: seconds to wait for other writers before giving up.
         use_fts: force FTS5 on/off for :meth:`recall` (default: auto-detect).
         half_life_days / recency_weight: recall ranking knobs.
+        subject_matching: attach extracted claims to an existing subject whose
+            content tokens overlap strongly (see :func:`~stancelog.extract.subject_similarity`),
+            so "don't use Redis for the cache" and "maybe Redis is better" share a
+            timeline. An explicit ``subject=`` always bypasses matching.
+        superseded_penalty: recall score multiplier for non-current beliefs
+            (only relevant with ``include_superseded=True``).
     """
 
     def __init__(
@@ -287,6 +302,8 @@ class Memory:
         use_fts: bool | None = None,
         half_life_days: float = 30.0,
         recency_weight: float = 0.3,
+        subject_matching: bool = True,
+        superseded_penalty: float = 0.5,
     ) -> None:
         raw = os.fspath(path) if path is not None else default_db_path()
         self._in_memory = raw == ":memory:" or raw.startswith("file::memory:")
@@ -308,6 +325,8 @@ class Memory:
         self.busy_timeout = float(busy_timeout)
         self.half_life_days = float(half_life_days)
         self.recency_weight = float(recency_weight)
+        self.subject_matching = bool(subject_matching)
+        self.superseded_penalty = float(superseded_penalty)
         self._want_fts = use_fts
         self._fts = False
         self._lock = threading.RLock()
@@ -670,6 +689,61 @@ class Memory:
             self._conn = None
         return report
 
+    # ------------------------------------------------------ subject matching
+    def _best_match(self, c: sqlite3.Connection, key: str, *, active_only: bool,
+                    exclude: set[str] | frozenset[str] = frozenset()) -> str | None:
+        """Existing subject that ``key`` fuzzily matches, or None.
+
+        Deterministic: highest :func:`subject_similarity` wins; ties go to the
+        subject with the most recent event, then to the lexicographically
+        smallest subject.
+        """
+        toks = subject_tokens(key)
+        if not toks:
+            return None
+        sql = "SELECT subject, max(seq) AS last FROM beliefs"
+        if active_only:
+            sql += " WHERE forgotten=0"
+        best: tuple[float, int, str] | None = None
+        for row in c.execute(sql + " GROUP BY subject"):
+            subj = row["subject"]
+            if subj == key or subj in exclude:
+                continue
+            sim = subject_similarity(toks, subject_tokens(subj))
+            if sim <= 0.0:
+                continue
+            cand = (sim, int(row["last"]), subj)
+            if best is None or (cand[0], cand[1]) > (best[0], best[1]) or (
+                (cand[0], cand[1]) == (best[0], best[1]) and cand[2] < best[2]
+            ):
+                best = cand
+        return best[2] if best else None
+
+    def _resolve_write(self, c: sqlite3.Connection, key: str, taken: set[str]) -> str:
+        """Subject under which a newly extracted claim is stored."""
+        if not self.subject_matching:
+            return key
+        if c.execute("SELECT 1 FROM beliefs WHERE subject=? AND forgotten=0 LIMIT 1", (key,)).fetchone():
+            return key  # exact live subject always wins
+        if key in taken:
+            return key
+        return self._best_match(c, key, active_only=True, exclude=taken) or key
+
+    def _resolve_read(self, c: sqlite3.Connection, subject: str) -> str:
+        """Subject key for a lookup: exact if it exists, else the best fuzzy match."""
+        key = normalize_subject(subject)
+        if not self.subject_matching:
+            return key
+        if c.execute("SELECT 1 FROM beliefs WHERE subject=? LIMIT 1", (key,)).fetchone():
+            return key
+        return (self._best_match(c, key, active_only=True)
+                or self._best_match(c, key, active_only=False) or key)
+
+    def resolve_subject(self, subject: str) -> str:
+        """The stored subject key that ``current``/``history``/... would use for ``subject``."""
+        with self._read() as c:
+            return self._resolve_read(c, subject)
+
     # ================================================================ public
     def remember(
         self,
@@ -698,6 +772,7 @@ class Memory:
         vf = _time.normalize(valid_from)
 
         claims: list[Claim]
+        match_subjects = subject is None
         if subject is not None:
             norm = normalize_subject(subject)
             if not norm:
@@ -727,7 +802,17 @@ class Memory:
         raw_text = text if text is not None else (value or "")
         ids: list[str] = []
         with self._tx() as c:
+            own = {cl.subject for cl in claims}
+            taken: set[str] = set()
             for cl in claims:
+                meta = dict(metadata or {})
+                key = cl.subject
+                if match_subjects:
+                    # never fold two claims of the same message into one subject
+                    key = self._resolve_write(c, cl.subject, taken | (own - {cl.subject}))
+                    if key != cl.subject:
+                        meta["matched_from"] = cl.subject
+                taken.add(key)
                 body = {
                     "polarity": cl.polarity,
                     "value": cl.value,
@@ -735,19 +820,19 @@ class Memory:
                     "source": source,
                     "confidence": cl.confidence,
                     "valid_from": vf,
-                    "metadata": metadata or {},
+                    "metadata": meta,
                 }
-                ev = self._append_event(c, "assert", cl.subject, body)
+                ev = self._append_event(c, "assert", key, body)
                 ids.append(ev["id"])
-                self._refresh_subject(c, cl.subject)
+                self._refresh_subject(c, key)
             rows = [c.execute("SELECT * FROM beliefs WHERE id=?", (i,)).fetchone() for i in ids]
         return [Belief._from_row(r) for r in rows]
 
     def current(self, subject: str, at: _time.TimeLike | None = None) -> Belief | None:
         """The belief about ``subject`` that is valid now (or at valid-time ``at``)."""
-        key = normalize_subject(subject)
         t = _time.normalize(at) or _time.now()
         with self._read() as c:
+            key = self._resolve_read(c, subject)
             row = c.execute(
                 "SELECT * FROM beliefs WHERE subject=? AND forgotten=0 AND valid_from<=? "
                 "AND (valid_to IS NULL OR valid_to>?) ORDER BY valid_from DESC, seq DESC LIMIT 1",
@@ -760,10 +845,10 @@ class Memory:
         ``known_at`` is transaction time ("using only what had been recorded by then")."""
         if known_at is None:
             return self.current(subject, at=at)
-        key = normalize_subject(subject)
         t, k = _time.normalize(at), _time.normalize(known_at)
         assert t is not None and k is not None
         with self._read() as c:
+            key = self._resolve_read(c, subject)
             events = [e for e in self._events_for(c, key) if e["recorded_at"] <= k]
         beliefs, _ = compute_timeline(events)
         best = pick_valid(beliefs, t)
@@ -785,17 +870,17 @@ class Memory:
 
     def history(self, subject: str, include_forgotten: bool = True) -> list[Belief]:
         """All beliefs ever recorded about ``subject``, in valid-time order."""
-        key = normalize_subject(subject)
         sql = "SELECT * FROM beliefs WHERE subject=?"
         if not include_forgotten:
             sql += " AND forgotten=0"
         with self._read() as c:
+            key = self._resolve_read(c, subject)
             rows = c.execute(sql + " ORDER BY valid_from, seq", (key,)).fetchall()
         return [Belief._from_row(r) for r in rows]
 
     def relations(self, subject: str) -> list[dict[str, str]]:
-        key = normalize_subject(subject)
         with self._read() as c:
+            key = self._resolve_read(c, subject)
             rows = c.execute(
                 "SELECT r.src, r.dst, r.kind FROM relations r JOIN beliefs b ON b.id=r.src "
                 "WHERE r.subject=? ORDER BY b.seq, r.kind", (key,)
@@ -815,6 +900,12 @@ class Memory:
         ``score = (1 - w) * relevance/max_relevance + w * 0.5 ** (age / half_life)``,
         scaled by ``0.75 + 0.25 * confidence``. By default only current
         (non-superseded, non-forgotten) beliefs are returned.
+
+        With ``include_superseded=True`` / ``include_forgotten=True`` the
+        non-current beliefs are returned too, flagged via ``Belief.status``,
+        with their score multiplied by ``superseded_penalty`` and capped just
+        below the current belief of the same subject, so a subject's current
+        belief always ranks above its own history.
         """
         terms = query_terms(query)
         if not terms or k <= 0:
@@ -846,12 +937,24 @@ class Memory:
         top = max(s for _, s in scored)
         half_life = max(self.half_life_days, 1e-9) * 86400.0
         w = min(max(self.recency_weight, 0.0), 1.0)
-        out = []
+        penalty = min(max(self.superseded_penalty, 0.0), 1.0)
+        raw: list[tuple[sqlite3.Row, float, bool]] = []
         for r, rel in scored:
             recency = 0.5 ** (_time.age_seconds(r["recorded_at"], now) / half_life)
             score = ((1 - w) * rel / top + w * recency) * (0.75 + 0.25 * float(r["confidence"]))
+            live = not r["forgotten"] and (r["valid_to"] is None or r["valid_to"] > now)
+            raw.append((r, score if live else score * penalty, live))
+        best_live: dict[str, float] = {}
+        for r, score, live in raw:
+            if live:
+                best_live[r["subject"]] = max(score, best_live.get(r["subject"], 0.0))
+        out = []
+        for r, score, live in raw:
+            if not live and r["subject"] in best_live:
+                score = min(score, best_live[r["subject"]] * 0.999)
             out.append(Belief._from_row(r, score=round(score, 6)))
-        out.sort(key=lambda b: (b.score or 0.0, b.seq), reverse=True)
+        # live beliefs win exact ties (rounding) over their own history
+        out.sort(key=lambda b: (b.score or 0.0, b.status == "current", b.seq), reverse=True)
         return out[:k]
 
     def forget(
@@ -888,7 +991,7 @@ class Memory:
                 affected = [row["id"]]
                 body = {"target_id": row["id"], "reason": reason, "source": source}
             else:
-                key = normalize_subject(subject if subject is not None else target)  # type: ignore[arg-type]
+                key = self._resolve_read(c, subject if subject is not None else target)  # type: ignore[arg-type]
                 affected = [r[0] for r in c.execute("SELECT id FROM beliefs WHERE subject=? AND forgotten=0", (key,))]
                 if not affected:
                     return []
@@ -911,7 +1014,7 @@ class Memory:
                 rows = c.execute("SELECT * FROM events ORDER BY seq").fetchall()
             else:
                 rows = c.execute("SELECT * FROM events WHERE subject=? ORDER BY seq",
-                                 (normalize_subject(subject),)).fetchall()
+                                 (self._resolve_read(c, subject),)).fetchall()
         out = []
         for r in rows:
             ev = _with_body(_row_to_event(r))
