@@ -76,13 +76,8 @@ def normalize_subject(subject: str) -> str:
     s = re.sub(r"[^\w\s\-./+#@:]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     s = s.strip(" .:-")
-    for _ in range(3):  # filler words can stack ("A anymore please")
-        new = _TRAILING_FILLER.sub("", s).strip(" .:-")
-        new = _LEADING_ARTICLE.sub("", new)
-        if new == s:
-            break
-        s = new
-    return s
+    s = _TRAILING_FILLER.sub("", s).strip(" .:-")  # fillers can stack ("A anymore please")
+    return _LEADING_ARTICLE.sub("", s, count=1)  # once: "the A approach" -> "a approach"
 
 
 # --------------------------------------------------------------------------- #
