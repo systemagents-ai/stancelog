@@ -267,8 +267,9 @@ class Memory:
             ``":memory:"`` gives a throwaway in-process store (no journal).
         extractor: anything implementing :class:`~stancelog.Extractor`;
             defaults to :class:`~stancelog.HeuristicExtractor`.
-        journal: keep the fsync'd JSONL mirror ``<path>.journal.jsonl`` used
-            for corruption recovery (default True).
+        journal: keep the fsync'd JSONL mirror used for corruption recovery.
+            ``True`` (default) -> ``<path>.journal.jsonl``; a path -> that file
+            (e.g. on another disk); ``False`` -> no journal (salvage-only recovery).
         check_on_open: run ``PRAGMA quick_check`` on open and auto-recover.
         busy_timeout: seconds to wait for other writers before giving up.
         use_fts: force FTS5 on/off for :meth:`recall` (default: auto-detect).
@@ -280,7 +281,7 @@ class Memory:
         path: str | os.PathLike[str] | None = None,
         *,
         extractor: Extractor | None = None,
-        journal: bool = True,
+        journal: bool | str | os.PathLike[str] = True,
         check_on_open: bool = True,
         busy_timeout: float = 30.0,
         use_fts: bool | None = None,
@@ -292,7 +293,13 @@ class Memory:
         self.path = raw if self._in_memory else os.path.abspath(os.path.expanduser(raw))
         if not self._in_memory:
             os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        self.journal_path = None if self._in_memory or not journal else self.path + ".journal.jsonl"
+        if self._in_memory or journal is False:
+            self.journal_path = None
+        elif journal is True:
+            self.journal_path = self.path + ".journal.jsonl"
+        else:
+            self.journal_path = os.path.abspath(os.path.expanduser(os.fspath(journal)))
+            os.makedirs(os.path.dirname(self.journal_path), exist_ok=True)
         self._journal = Journal(self.journal_path) if self.journal_path else None
         self._lock_path = None if self._in_memory else self.path + ".lock"
         self.extractor: Extractor = extractor or HeuristicExtractor()

@@ -219,3 +219,24 @@ def test_lost_journal_line_is_reported_as_acknowledged_break(db_path):
         assert len(m.events()) == 5
         rep = m.check()
         assert rep["ok"] and rep["acknowledged_breaks"] == [4]
+
+
+def test_journal_on_separate_path_survives_db_deletion(tmp_path):
+    db = str(tmp_path / "a" / "mem.db")
+    jp = str(tmp_path / "b" / "mem.journal")
+    with Memory(db, journal=jp) as m:
+        m.remember("don't do A")
+        m.remember("A is better")
+    assert os.path.exists(jp)
+    os.remove(db)
+    with Memory(db, journal=jp) as m:
+        assert m.recovery is not None
+        assert [b.stance for b in m.history("a")] == ["negative", "positive"]
+        assert m.check()["ok"]
+
+
+def test_no_journal_mode(db_path):
+    with Memory(db_path, journal=False) as m:
+        m.remember("use A")
+        assert m.check()["ok"]
+    assert not os.path.exists(db_path + ".journal.jsonl")

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "stancelog": {
+      "command": "stancelog",
+      "args": ["serve-mcp"],
+      "env": {
+        "STANCELOG_DB": "~/.stancelog/memory.db"
+      }
+    }
+  }
+}
