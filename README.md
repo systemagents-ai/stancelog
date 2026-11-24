@@ -1,5 +1,8 @@
 # stancelog
 
+[![CI](https://github.com/systemagents-ai/stancelog/actions/workflows/ci.yml/badge.svg)](https://github.com/systemagents-ai/stancelog/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Crash-proof, contradiction-aware memory for AI agents.**
 
 stancelog is a small Python library, CLI and MCP server that gives an agent a long-term memory of
@@ -42,8 +45,16 @@ closed (its `valid_to` is set), and the two are linked by `supersedes` and `cont
 
 ## Install
 
+stancelog is not on PyPI yet. Install it from GitHub:
+
 ```bash
-pip install stancelog          # once published; for now, from a checkout:
+pip install git+https://github.com/systemagents-ai/stancelog
+```
+
+Or, for development, from a checkout:
+
+```bash
+git clone https://github.com/systemagents-ai/stancelog && cd stancelog
 pip install -e ".[dev]"        # dev extra = pytest
 ```
 
@@ -319,6 +330,11 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 pytest -q
 ```
+
+## Contributing
+
+Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup,
+the design invariants every change must keep, and PR guidelines.
 
 ## License
 

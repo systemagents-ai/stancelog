@@ -24,6 +24,11 @@ classifiers = [
 ]
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/systemagents-ai/stancelog"
+Repository = "https://github.com/systemagents-ai/stancelog"
+Issues = "https://github.com/systemagents-ai/stancelog/issues"
+
 [project.optional-dependencies]
 dev = ["pytest>=7"]
 
